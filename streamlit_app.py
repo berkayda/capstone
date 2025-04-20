@@ -3,7 +3,7 @@ import httpx
 import time
 import os
 from dotenv import load_dotenv
-from websocket_client import get_binance_ws
+from websocket_client import get_binance_ws, get_user_ws
 
 # === Session State Initialize ===
 if "token" not in st.session_state:
@@ -14,6 +14,10 @@ if "ws_client" not in st.session_state:
     st.session_state["ws_client"] = get_binance_ws()
 if "page" not in st.session_state:
     st.session_state["page"] = "Market Data"
+
+# İşte buraya:
+if "user_ws" not in st.session_state:
+    st.session_state["user_ws"] = None
 
 # .env dosyasını yükle
 dotenv_path = os.path.join(os.path.dirname(__file__), "../backend/.env")
@@ -88,14 +92,31 @@ if not st.session_state["token"]:
 
 # === Giriş yapıldıysa ===
 else:
-    # --- Sidebar Menüsü ---
-    menu = st.sidebar.radio(
-        "Menü",
-        ["Kullanıcı Bilgileri", "Market Data"],
-        index=1 if st.session_state["page"] == "Market Data" else 0
-    )
+    menu = st.sidebar.radio("Menü", ["API Ayarları","Kullanıcı Bilgileri","Market Data"],
+                            index=2 if st.session_state["page"] == "Market Data" else 1)
 
-    if menu == "Kullanıcı Bilgileri":
+    # --- API Ayarları: Anahtar / Secret girilecek form ---
+    if menu == "API Ayarları":
+        st.header("📡 Binance API Ayarları")
+        token = st.session_state["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Mevcut değerleri al
+        resp = httpx.get(f"{BASE_URL}/user/api-keys", headers=headers, timeout=5)
+        data = resp.json()
+        api_key = st.text_input("API Key",    value=data.get("api_key",""))
+        api_secret = st.text_input("API Secret", value=data.get("api_secret",""), type="password")
+
+        if st.button("Kaydet"):
+            payload = {"api_key": api_key, "api_secret": api_secret}
+            r = httpx.post(f"{BASE_URL}/user/api-keys", headers=headers, json=payload, timeout=5)
+            if r.status_code == 200:
+                st.success("API anahtarınız kaydedildi!")
+                st.rerun()
+            else:
+                st.error("Kaydedilemedi: "+r.text)
+
+    elif menu == "Kullanıcı Bilgileri":
         st.header("Kullanıcı Bilgilerim")
 
         token = st.session_state["token"]
@@ -241,6 +262,19 @@ else:
         # 1) Ticker yukarıda gösterilsin
         # ======================
         ticker_placeholder = st.empty()
+        # Pozisyon/trade placeholder’ları
+        port_ph = st.empty()
+        trade_title_ph = st.empty()
+        trade_body_ph = st.empty()
+
+        # Takip ettiğimiz semboller:
+        small_coin_map = {
+            "BTCUSDT": "BTC/USDT",
+            "ETHUSDT": "ETH/USDT",
+            "BNBUSDT": "BNB/USDT",
+            "SOLUSDT": "SOL/USDT",
+            "XRPUSDT": "XRP/USDT"
+        }
 
         def render_ticker(prices):
             """Her saniye güncellenecek Ticker HTML'ini oluşturur."""
@@ -271,79 +305,69 @@ else:
             ticker_html += "</div>"
             return ticker_html
 
-        # ======================
-        # 2) Portföy ve Trade
-        # ======================
-        portfolio_html = """
-        <div class="portfolio-container">
-            <div class="portfolio-title">Portföy Bilgisi</div>
-            <div class="portfolio-value">$12,548.32</div>
-            <div class="portfolio-changes">
-                <div class="change-box">
-                    <div class="change-label">Saatlik</div>
-                    <div class="change-value">+2.5%</div>
-                </div>
-                <div class="change-box">
-                    <div class="change-label">Günlük</div>
-                    <div class="change-value">-1.2%</div>
-                </div>
-                <div class="change-box">
-                    <div class="change-label">Haftalık</div>
-                    <div class="change-value">+5.6%</div>
-                </div>
-            </div>
-        </div>
-        """
+        # 6) Portföy render fonksiyonu (positionAmt × currentPrice)
+        def render_portfolio(positions, prices):
+            total = 0.0
+            details = ""
+            for sym, lbl in small_coin_map.items():
+                amt = float(positions.get(sym, {}).get("positionAmt", 0))
+                price = float(prices.get(sym, 0))
+                val = amt * price
+                total += val
+                details += f"<div><strong>{lbl}:</strong> {amt} @ {price:,.2f} USD</div>"
+            return (
+                "<div class=\"portfolio-container\">"
+                "<div class=\"portfolio-title\">Portföy Değeri</div>"
+                f"<div class=\"portfolio-value\">${total:,.2f}</div>"
+                f"<div class=\"portfolio-details\">{details}</div>"
+                "</div>"
+            )
 
-        trade_html = """
-        <div class="trade-history">
-            <h3>Trade History</h3>
-            <table class="trade-table">
-                <tr>
-                    <th>Coin</th>
-                    <th>Side</th>
-                    <th>Quantity</th>
-                    <th>Price</th>
-                    <th>PNL</th>
-                    <th>Time</th>
-                </tr>
-                <tr>
-                    <td>BTC/USDT</td>
-                    <td>BUY</td>
-                    <td>0.002</td>
-                    <td>$28,500.00</td>
-                    <td style="color: green;">+$10.50</td>
-                    <td>2025-03-23 14:30</td>
-                </tr>
-                <tr>
-                    <td>ETH/USDT</td>
-                    <td>SELL</td>
-                    <td>0.05</td>
-                    <td>$1,800.00</td>
-                    <td style="color: red;">-$3.25</td>
-                    <td>2025-03-23 15:10</td>
-                </tr>
-            </table>
-        </div>
-        """
+        # ---- User Stream: Pozisyon & Trade History ----
+        if not st.session_state["user_ws"]:
+            # eğer henüz yoksa kullanıcıdan al
+            # backend’den kaydedilmiş keyleri çekip kur
+            token = st.session_state["token"]
+            headers = {"Authorization": f"Bearer {token}"}
+            r = httpx.get(f"{BASE_URL}/user/api-keys", headers=headers, timeout=5)
+            d = r.json()
+            if d.get("api_key") and d.get("api_secret"):
+                st.session_state["user_ws"] = get_user_ws(d["api_key"], d["api_secret"])
+            else:
+                # st.warning("Lütfen önce API Ayarları sayfasından anahtarlarınızı kaydedin.")
+                # st.stop()
+                # yoksa boş geç
+                st.session_state["user_ws"] = None
 
-        # Portföy + Trade tabloyu alt tarafta SABİT gösterelim:
-        st.markdown(portfolio_html, unsafe_allow_html=True)
-        st.markdown(trade_html, unsafe_allow_html=True)
 
-        # ======================
-        # 3) Sadece Ticker'ı sürekli güncelle
-        # ======================
+        user_ws = st.session_state["user_ws"]
+
+        # 3) Sonsuz döngü — her 1 saniyede bir güncelle
         while True:
-            # 3a) Websocket'ten anlık fiyatları al
+            # — Public ticker güncellemesi (her koşulda)
             prices = st.session_state["ws_client"].latest_prices
-            # Örnek: prices = {"BTCUSDT": 24882.5, "ETHUSDT": 1550.4, ...}
+            ticker_placeholder.markdown(render_ticker(prices), unsafe_allow_html=True)
 
-            # 3b) Ticker HTML'i oluştur
-            new_ticker_html = render_ticker(prices)
+            # — Kullanıcı stream’i varsa dinamik bölümleri güncelle
+            if user_ws:
+                # — Portföy güncelle
+                port_ph.markdown(
+                    render_portfolio(user_ws.positions, prices),
+                    unsafe_allow_html=True
+                )
+            else:
+                port_ph.info("Portföy görmek için API anahtarlarınızı girin.")
 
-            # 3c) Yukarıdaki placeholder'da göster
-            ticker_placeholder.markdown(new_ticker_html, unsafe_allow_html=True)
+            # — Açık pozisyonlar / trade history
+            if user_ws:
+                trades = user_ws.trade_history[-99:]
+                trade_title_ph.markdown("### Açık Pozisyonlar")
+                if trades:
+                    trade_body_ph.table(trades)
+                else:
+                    trade_body_ph.info("Şu anda açık pozisyonunuz bulunmuyor.")
+            else:
+                trade_title_ph.empty()
+                trade_body_ph.empty()
 
-            # 3d) Her 1 saniyede bir güncelleme
             time.sleep(1)
