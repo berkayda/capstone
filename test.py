@@ -4,7 +4,14 @@
 # cd .venv\frontend
 # streamlit run streamlit_app.py
 
+# lokal db için
+# DATABASE_URL=sqlite+aiosqlite:///./capstone.db
 
+# güncel db'yi özel karakterlere uyumlu hale getiren kod
+# from urllib.parse import quote_plus
+# print(quote_plus("(,2(hpK.6Ywz"))  # => %28%2C2%28hpK.6Ywz
+
+"""
 import bcrypt
 
 # Veritabanından çektiğin hash
@@ -70,3 +77,16 @@ conn.commit()
 conn.close()
 
 print("Boş e-posta içeren kayıtlar temizlendi.")
+"""
+
+
+# migrate.py
+import sqlite3
+
+conn = sqlite3.connect("capstone.db")
+cursor = conn.cursor()
+cursor.execute("ALTER TABLE users ADD COLUMN api_key TEXT")
+cursor.execute("ALTER TABLE users ADD COLUMN api_secret TEXT")
+conn.commit()
+conn.close()
+print("users tablosuna api_key ve api_secret sütunları eklendi.")
